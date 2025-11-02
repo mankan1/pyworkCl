@@ -1,7 +1,6 @@
 {
   "name": "tradeflash-client",
   "version": "1.0.0",
-  "private": true,
   "main": "node_modules/expo/AppEntry.js",
   "scripts": {
     "start": "expo start",
@@ -9,7 +8,7 @@
     "ios": "expo run:ios",
     "web": "expo start --web",
     "build:web": "expo export -p web --output-dir dist",
-    "preview:web": "npx serve dist",
+    "preview:web": "npx serve dist",              // optional local preview
     "vercel-build": "expo export -p web --output-dir dist"
   },
   "dependencies": {
@@ -26,9 +25,5 @@
   "devDependencies": {
     "@types/react": "~18.3.12",
     "typescript": "^5.3.3"
-  },
-  "engines": {
-    "node": ">=18"
   }
 }
-
