@@ -1,4 +1,4 @@
-const API = "pywork-production.up.railway.app"; //process.env.EXPO_PUBLIC_API_BASE || "http://localhost:8080";
+const API = "https://pywork-production.up.railway.app"; //process.env.EXPO_PUBLIC_API_BASE || "http://localhost:8080";
 
 export async function getSummary(tf: string) {
   const r = await fetch(`${API}/api/insights/summary?tf=${encodeURIComponent(tf)}`);
