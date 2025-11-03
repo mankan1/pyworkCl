@@ -1,7 +1,5 @@
-// client/src/screens/InsightsScreen.tsx
+// src/screens/InsightsScreen.tsx
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { fmt, pct, ratio01 } from "../lib/num";
-
 import {
   SafeAreaView,
   ScrollView,
@@ -9,10 +7,11 @@ import {
   Text,
   StyleSheet,
   RefreshControl,
+  ActivityIndicator,
 } from "react-native";
 import { getSummary, getSentiment, getPatterns } from "../api/insights";
 
-/* ---------- Types (same shape your server returns) ---------- */
+/* ---------- Types (match what your server returns) ---------- */
 
 type Summary = {
   timeframe: string;
@@ -20,20 +19,40 @@ type Summary = {
   breadth: { advancers: number; decliners: number; unchanged: number };
   volume: { total: number; up: number; down: number };
   trend: { bias: "up" | "down" | "sideways"; strength: number };
-  iv_rank: Record<string, number | null | undefined>;
+  // new optional fields
+  thrust?: number; // 0..1 (up-volume share)
+  vola?: {
+    SPY?: { atr_pct: number | null; hv20: number | null };
+    QQQ?: { atr_pct: number | null; hv20: number | null };
+    IWM?: { atr_pct: number | null; hv20: number | null };
+  };
+  smas?: { SPY?: { sma20: number | null; sma50: number | null } };
+  meta?: { session?: "PRE" | "REG" | "POST" | "CLOSED"; data_source?: "live" | "cache"; tf?: string; asof?: string };
   note?: string;
 };
 
 type Sentiment = {
   put_call_vol_ratio: number | null;
   put_call_oi_ratio: number | null;
-  dark_pool_score: number | null; // 0..1
-  news_sentiment: { score: number | null; sample: number | null };
-  options_uoa: { symbol: string; side: "CALL" | "PUT"; ratio: number | null; note?: string }[] | null;
+  dark_pool_score?: number; // 0..1
+  news_sentiment?: { score: number; sample: number };
+  atm_iv_mid?: Record<string, number | null>; // { SPY: 0.22, ... }
+  options_uoa: {
+    symbol: string;
+    side: "CALL" | "PUT";
+    ratio: number;
+    note?: string;
+    occ?: string;
+    vol?: number;
+    oi?: number;
+    strike?: number;
+    exp?: string;
+  }[];
+  meta?: { session?: "PRE" | "REG" | "POST" | "CLOSED"; data_source?: "live" | "cache"; asof?: string };
 };
 
-type PatternItem = { symbol: string; type: string; confidence: number | null };
-type Patterns = { timeframe: string; patterns: PatternItem[] | null };
+type PatternItem = { symbol: string; type: string; confidence: number };
+type Patterns = { timeframe: string; patterns: PatternItem[] };
 
 /* ---------- Screen ---------- */
 
@@ -58,6 +77,9 @@ export default function InsightsScreen() {
       setPatterns(p);
     } catch (e: any) {
       setErr(e?.message ?? "Failed to load insights");
+      setSummary(null);
+      setSentiment(null);
+      setPatterns(null);
     } finally {
       setLoading(false);
     }
@@ -68,10 +90,15 @@ export default function InsightsScreen() {
   }, [load]);
 
   const updatedText = useMemo(() => {
-    if (!summary?.updated_at) return "";
-    const d = new Date(summary.updated_at);
+    const iso = summary?.updated_at || sentiment?.meta?.asof;
+    if (!iso) return "";
+    const d = new Date(iso);
     return `Updated ${d.toLocaleString()}`;
-  }, [summary?.updated_at]);
+  }, [summary?.updated_at, sentiment?.meta?.asof]);
+
+  const mode = (summary as any)?.meta ?? (sentiment as any)?.meta;
+  const sessionClosed = mode?.session === "CLOSED";
+  const usingCache = mode?.data_source === "cache";
 
   return (
     <SafeAreaView style={styles.safe}>
@@ -81,78 +108,94 @@ export default function InsightsScreen() {
       >
         <Text style={styles.title}>Insights</Text>
         {!!updatedText && <Text style={styles.updated}>{updatedText}</Text>}
-        {err && <Banner type="error" text={err} />}
 
-        {/* ⬇️ Add this block */}
-        {(() => {
-          const mode = (summary as any)?.meta ?? (sentiment as any)?.meta ?? (patterns as any)?.meta;
-          const closed = mode?.session === "CLOSED";
-          const usingCache = mode?.data_source === "cache";
-          if (!closed && !usingCache) return null;
-          return (
-            <Banner
-              type="info"
-              text={
-                closed
-                  ? "Market closed — showing last snapshot"
-                  : "Showing cached snapshot until live data is available"
-              }
-            />
-          );
-        })()}
-        {/* ⬆️ Add this block */}
+        {(sessionClosed || usingCache) && (
+          <Banner
+            type="info"
+            text={
+              sessionClosed
+                ? "Market closed — showing last snapshot"
+                : "Showing cached snapshot until live data is available"
+            }
+          />
+        )}
 
+        {err && (
+          <Banner type="error" text={err} />
+        )}
+
+        {loading && !summary && !sentiment && !patterns ? (
+          <View style={{ paddingTop: 32, alignItems: "center" }}>
+            <ActivityIndicator />
+            <Text style={{ color: "#9aa4b2", marginTop: 8 }}>Loading…</Text>
+          </View>
+        ) : null}
 
         {/* SUMMARY CARD */}
         {summary && (
-          <Card title="Summary" subtitle={summary.timeframe?.toUpperCase?.()}>
+          <Card title="Summary" subtitle={summary.timeframe?.toUpperCase?.() || ""}>
             <Row>
               <Col style={{ flex: 1 }}>
                 <Label>Market Breadth</Label>
                 <BreadthBar
-                  advancers={num(summary.breadth?.advancers)}
-                  decliners={num(summary.breadth?.decliners)}
-                  unchanged={num(summary.breadth?.unchanged)}
+                  advancers={summary.breadth.advancers}
+                  decliners={summary.breadth.decliners}
+                  unchanged={summary.breadth.unchanged}
                 />
                 <Tiny>
-                  A:{fmtInt(summary.breadth?.advancers)} · D:{fmtInt(summary.breadth?.decliners)} · U:
-                  {fmtInt(summary.breadth?.unchanged)}
+                  A:{summary.breadth.advancers} · D:{summary.breadth.decliners} · U:{summary.breadth.unchanged}
                 </Tiny>
               </Col>
               <Col style={{ width: 12 }} />
               <Col style={{ flex: 1 }}>
                 <Label>Volume</Label>
-                <VolumeBar
-                  up={num(summary.volume?.up)}
-                  down={num(summary.volume?.down)}
-                  total={num(summary.volume?.total)}
-                />
+                <VolumeBar up={summary.volume.up} down={summary.volume.down} total={summary.volume.total} />
                 <Tiny>
-                  Up {fmtNum(summary.volume?.up)} · Down {fmtNum(summary.volume?.down)} · Total{" "}
-                  {fmtNum(summary.volume?.total)}
+                  Up {fmtNum(summary.volume.up)} · Down {fmtNum(summary.volume.down)} · Total {fmtNum(summary.volume.total)}
                 </Tiny>
               </Col>
             </Row>
 
             <Spacer size={12} />
+
             <Row style={{ alignItems: "center" }}>
               <Col>
                 <Label>Trend</Label>
-                <TrendBadge bias={summary.trend?.bias ?? "sideways"} strength={num01(summary.trend?.strength)} />
+                <TrendBadge bias={summary.trend.bias} strength={safe01(summary.trend.strength)} />
               </Col>
               <Col style={{ flex: 1 }} />
               <Col>
-                <Label>IV Rank</Label>
-                <Wrap>
-                  {Object.entries(summary.iv_rank ?? {}).map(([sym, r]) => {
-                    const v = toNum(r);
-                    const text = Number.isFinite(v) ? `${sym} ${v}` : `${sym} —`;
-                    const tone = Number.isFinite(v) ? ivTone(v) : "neutral";
-                    return <Chip key={sym} tone={tone as any} text={text} />;
-                  })}
-                </Wrap>
+                <Label>Volatility Snapshot</Label>
+                {!!summary.vola ? (
+                  <Wrap>
+                    {["SPY", "QQQ", "IWM"].map((sym) => {
+                      const v = (summary.vola as any)[sym];
+                      if (!v) return null;
+                      const atrp = isNum(v.atr_pct) ? `${round1(v.atr_pct * 100)}% ATR` : "ATR –";
+                      const hv = isNum(v.hv20) ? `${round1(v.hv20 * 100)}% HV20` : "HV20 –";
+                      return <Chip key={sym} tone="neutral" text={`${sym} ${atrp} · ${hv}`} />;
+                    })}
+                  </Wrap>
+                ) : (
+                  <Tiny style={{ opacity: 0.7 }}>—</Tiny>
+                )}
               </Col>
             </Row>
+
+            {/* Thrust (Up-volume share) */}
+            {isNum(summary.thrust) && (
+              <>
+                <Spacer size={10} />
+                <Row>
+                  <Stat
+                    label="Thrust (Up Vol)"
+                    value={pct(safe01(summary.thrust))}
+                    tone={summary.thrust! > 0.55 ? "good" : summary.thrust! < 0.45 ? "warn" : "neutral"}
+                  />
+                  <View style={{ flex: 1 }} />
+                </Row>
+              </>
+            )}
 
             {!!summary.note && (
               <>
@@ -169,65 +212,90 @@ export default function InsightsScreen() {
             <Row>
               <Stat
                 label="Put/Call (Vol)"
-                value={fmt(sentiment.put_call_vol_ratio, 2)}
-                tone={pcTone(sentiment.put_call_vol_ratio)}
+                value={isNum(sentiment.put_call_vol_ratio) ? fmtFloat(sentiment.put_call_vol_ratio, 2) : "–"}
+                tone={isNum(sentiment.put_call_vol_ratio) ? pcTone(sentiment.put_call_vol_ratio!) : "neutral"}
               />
               <Stat
                 label="Put/Call (OI)"
-                value={fmt(sentiment.put_call_oi_ratio, 2)}
-                tone={pcTone(sentiment.put_call_oi_ratio)}
+                value={isNum(sentiment.put_call_oi_ratio) ? fmtFloat(sentiment.put_call_oi_ratio, 2) : "–"}
+                tone={isNum(sentiment.put_call_oi_ratio) ? pcTone(sentiment.put_call_oi_ratio!) : "neutral"}
               />
-              <Stat label="Dark Pool" value={pct(sentiment.dark_pool_score)} />
+              <Stat
+                label="Dark Pool"
+                value={isNum(sentiment.dark_pool_score) ? pct(safe01(sentiment.dark_pool_score!)) : "–"}
+              />
               <Stat
                 label="News"
-                value={newsString(sentiment.news_sentiment)}
+                value={
+                  sentiment.news_sentiment
+                    ? `${sign(sentiment.news_sentiment.score)}${Math.abs(sentiment.news_sentiment.score).toFixed(2)} (${sentiment.news_sentiment.sample})`
+                    : "–"
+                }
               />
             </Row>
 
-            <Spacer size={10} />
-            <Label>Unusual Options Activity</Label>
-            <List>
-              {(sentiment.options_uoa ?? []).map((u, i) => {
-                const ratioTxt = `ratio ${fmt(u?.ratio, 2)}`;
-                return (
-                  <ListItem key={`${u?.symbol ?? "?"}-${i}`}>
-                    <Wrap>
-                      <Chip
-                        tone={u?.side === "CALL" ? "good" : "warn"}
-                        text={`${u?.symbol ?? "—"} ${u?.side ?? ""}`.trim()}
-                      />
-                      <Chip text={ratioTxt} />
-                      {u?.note ? <Chip tone="muted" text={u.note} /> : null}
-                    </Wrap>
-                  </ListItem>
-                );
-              })}
-            </List>
+            {!!sentiment.atm_iv_mid && Object.keys(sentiment.atm_iv_mid).length > 0 && (
+              <>
+                <Spacer size={10} />
+                <Label>ATM IV (nearest)</Label>
+                <Wrap>
+                  {Object.entries(sentiment.atm_iv_mid).map(([sym, iv]) => (
+                    <Chip
+                      key={sym}
+                      tone="muted"
+                      text={`${sym} ${isNum(iv) ? `${round1((iv as number) * 100)}%` : "–"}`}
+                    />
+                  ))}
+                </Wrap>
+              </>
+            )}
+
+            {/* UOA list */}
+            {sentiment.options_uoa?.length ? (
+              <>
+                <Spacer size={10} />
+                <Label>Unusual Options Activity</Label>
+                <List>
+                  {sentiment.options_uoa.map((u, i) => (
+                    <ListItem key={`${u.symbol}-${i}`}>
+                      <Wrap>
+                        <Chip tone={u.side === "CALL" ? "good" : "warn"} text={`${u.symbol} ${u.side}`} />
+                        {isNum(u.ratio) && <Chip text={`ratio ${round1(u.ratio)}`} />}
+                        {u.strike && u.exp && <Chip tone="muted" text={`${u.strike} ${u.exp}`} />}
+                        {u.note ? <Chip tone="muted" text={u.note} /> : null}
+                      </Wrap>
+                    </ListItem>
+                  ))}
+                </List>
+              </>
+            ) : null}
           </Card>
         )}
 
         {/* PATTERNS CARD */}
         {patterns && (
-          <Card title="Patterns" subtitle={`${patterns.timeframe?.toUpperCase?.()} scans`}>
-            <List>
-              {(patterns.patterns ?? []).map((p) => (
-                <ListItem key={`${p.symbol}-${p.type}`}>
-                  <Row style={{ alignItems: "center" }}>
-                    <Text style={styles.symbol}>{p.symbol}</Text>
-                    <Chip tone="muted" text={p.type} />
-                    <View style={{ flex: 1 }} />
-                    <ConfidenceBar confidence={num01(p.confidence)} />
-                  </Row>
-                </ListItem>
-              ))}
-            </List>
+          <Card title="Patterns" subtitle={`${patterns.timeframe?.toUpperCase?.() || ""} scans`}>
+            {patterns.patterns?.length ? (
+              <List>
+                {patterns.patterns.map((p) => (
+                  <ListItem key={`${p.symbol}-${p.type}`}>
+                    <Row style={{ alignItems: "center" }}>
+                      <Text style={styles.symbol}>{p.symbol}</Text>
+                      <Chip tone="muted" text={p.type} />
+                      <View style={{ flex: 1 }} />
+                      <ConfidenceBar confidence={safe01(p.confidence)} />
+                    </Row>
+                  </ListItem>
+                ))}
+              </List>
+            ) : (
+              <Tiny style={{ opacity: 0.7 }}>No patterns</Tiny>
+            )}
           </Card>
         )}
 
         {!loading && !summary && !sentiment && !patterns && (
-          <Text style={{ opacity: 0.6, textAlign: "center", marginTop: 24 }}>
-            No data yet. Pull to refresh.
-          </Text>
+          <Text style={{ opacity: 0.6, textAlign: "center", marginTop: 24 }}>No data yet. Pull to refresh.</Text>
         )}
 
         <Spacer size={28} />
@@ -310,7 +378,7 @@ function TrendBadge({ bias, strength }: { bias: "up" | "down" | "sideways"; stre
   return (
     <View style={[styles.trendBadge, chipTone(tone as any)]}>
       <Text style={styles.chipText}>
-        {bias?.toUpperCase?.()} · {pct(strength)}
+        {bias.toUpperCase()} · {pct(strength)}
       </Text>
     </View>
   );
@@ -319,7 +387,7 @@ function BreadthBar({ advancers, decliners, unchanged }: { advancers: number; de
   const total = Math.max(1, advancers + decliners + unchanged);
   const a = (advancers / total) * 100;
   const d = (decliners / total) * 100;
-  const u = Math.max(0, 100 - a - d);
+  const u = 100 - a - d;
   return (
     <View style={styles.barTrack}>
       <View style={[styles.barSeg, { flexBasis: `${a}%` }, styles.good]} />
@@ -330,8 +398,8 @@ function BreadthBar({ advancers, decliners, unchanged }: { advancers: number; de
 }
 function VolumeBar({ up, down, total }: { up: number; down: number; total: number }) {
   const t = Math.max(1, total || up + down);
-  const pUp = Math.max(0, Math.min(100, (up / t) * 100));
-  const pDown = Math.max(0, Math.min(100, (down / t) * 100));
+  const pUp = (up / t) * 100;
+  const pDown = (down / t) * 100;
   return (
     <View style={styles.barTrack}>
       <View style={[styles.barSeg, { flexBasis: `${pUp}%` }, styles.good]} />
@@ -344,49 +412,30 @@ function ConfidenceBar({ confidence }: { confidence: number }) {
   return (
     <View style={styles.confTrack}>
       <View style={[styles.confFill, { width: `${pctv * 100}%` }]} />
-      <Text style={styles.confText}>{pct(pctv)}</Text>
+      <Text style={styles.confText}>{pct(confidence)}</Text>
     </View>
   );
 }
 
-/* ---------- Helpers (null-safe) ---------- */
+/* ---------- Helpers ---------- */
 
-const toNum = (x: any) => (Number.isFinite(Number(x)) ? Number(x) : NaN);
-const num = (x: any) => (Number.isFinite(Number(x)) ? Number(x) : 0);
-const num01 = (x: any) => {
-  const v = Number(x);
-  return Number.isFinite(v) ? Math.max(0, Math.min(1, v)) : 0;
+const isNum = (v: any): v is number => typeof v === "number" && Number.isFinite(v);
+const safe01 = (v: number) => Math.max(0, Math.min(1, v));
+
+const fmtNum = (n: number) =>
+  Intl.NumberFormat(undefined, { notation: "compact", maximumFractionDigits: 1 }).format(n);
+
+const fmtFloat = (v: number, d: number) => {
+  if (!isNum(v)) return "–";
+  const f = Math.pow(10, d);
+  return String(Math.round(v * f) / f);
 };
 
-const fmtInt = (n: any) => {
-  const v = Number(n);
-  return Number.isFinite(v) ? Math.round(v).toString() : "—";
-};
+const round1 = (v: number) => Math.round(v * 10) / 10;
+const pct = (v: number) => `${Math.round(safe01(v) * 100)}%`;
+const sign = (v: number) => (v > 0 ? "+" : "");
 
-const fmtNum = (n: any) => {
-  const v = Number(n);
-  return Number.isFinite(v)
-    ? Intl.NumberFormat(undefined, { notation: "compact", maximumFractionDigits: 1 }).format(v)
-    : "—";
-};
-
-const newsString = (ns: { score: number | null; sample: number | null } | null) => {
-  const v = toNum(ns?.score);
-  if (!Number.isFinite(v)) return "—";
-  const s = v > 0 ? "+" : "";
-  const sample = Number.isFinite(Number(ns?.sample)) ? String(ns?.sample) : "—";
-  // use fmt for 2dp, but ensure we show absolute value
-  const val = fmt(Math.abs(v), 2);
-  return `${s}${val} (${sample})`;
-};
-
-const pcTone = (ratio: number | null | undefined) => {
-  const v = Number(ratio);
-  if (!Number.isFinite(v)) return "neutral";
-  return v < 0.9 ? "good" : v > 1.1 ? "warn" : "neutral";
-};
-
-const ivTone = (r: number) => (r >= 60 ? "warn" : r <= 20 ? "good" : "neutral");
+const pcTone = (ratio: number) => (ratio < 0.9 ? "good" : ratio > 1.1 ? "warn" : "neutral");
 const chipTone = (tone: "muted" | "good" | "warn" | "neutral") =>
   tone === "good" ? styles.goodBg : tone === "warn" ? styles.warnBg : tone === "neutral" ? styles.neutralBg : styles.mutedBg;
 
@@ -477,7 +526,8 @@ const styles = StyleSheet.create({
     left: 0,
     right: 0,
     textAlign: "center",
-    textAlignVertical: "center",
+    // RN web will ignore textAlignVertical; safe to keep
+    textAlignVertical: "center" as any,
     color: "#e9eef5",
     fontSize: 12,
   },
@@ -497,8 +547,10 @@ const styles = StyleSheet.create({
     padding: 10,
     borderRadius: 12,
     borderWidth: 1,
+    marginTop: 8,
   },
   bannerErr: { backgroundColor: "rgba(249,112,102,0.12)", borderColor: "rgba(249,112,102,0.35)" },
   bannerInfo: { backgroundColor: "rgba(46,125,215,0.12)", borderColor: "rgba(46,125,215,0.35)" },
   bannerText: { color: "#e9eef5" },
 });
+
